@@ -54,6 +54,9 @@ vs_preflight() {
 vs_apt() {
 	log "installing build and runtime packages"
 	export DEBIAN_FRONTEND=noninteractive
+	# Ubuntu's needrestart hook otherwise restarts a dozen services -- sshd
+	# among them -- in the middle of the install.
+	export NEEDRESTART_SUSPEND=1
 	apt-get update -qq
 	apt-get install -y -qq --no-install-recommends \
 		ca-certificates curl unzip git make gcc libc6-dev jq iproute2 iptables procps >/dev/null
@@ -113,8 +116,9 @@ vs_install_amneziawg() {
 	(
 		cd "$BUILD_DIR/awg-go"
 		export PATH="$(dirname "$GO_BIN"):$PATH" GOFLAGS=-buildvcs=false GOCACHE="$BUILD_DIR/gocache"
-		make >/dev/null
-	) || die "amneziawg-go build failed"
+		make
+	) > "$BUILD_DIR/awg-go.log" 2>&1 \
+		|| die "amneziawg-go build failed: $(tail -15 "$BUILD_DIR/awg-go.log")"
 
 	local bin
 	bin=$(find "$BUILD_DIR/awg-go" -maxdepth 1 -type f \( -name amneziawg-go -o -name awg-go \) | head -1)
@@ -126,10 +130,11 @@ vs_install_amneziawg() {
 		|| { rm -rf "$BUILD_DIR/awg-tools"; git clone -q --depth 1 https://github.com/amnezia-vpn/amneziawg-tools "$BUILD_DIR/awg-tools"; }
 	(
 		cd "$BUILD_DIR/awg-tools/src"
-		make -s -j"$(nproc)" >/dev/null
+		make -s -j"$(nproc)"
 		make -s install PREFIX=/usr SYSCONFDIR=/etc SYSTEMDUNITDIR="$SYSTEMD_DIR" \
-			WITH_WGQUICK=yes WITH_SYSTEMDUNITS=yes WITH_BASHCOMPLETION=yes >/dev/null
-	) || die "amneziawg-tools build failed"
+			WITH_WGQUICK=yes WITH_SYSTEMDUNITS=yes WITH_BASHCOMPLETION=yes
+	) > "$BUILD_DIR/awg-tools.log" 2>&1 \
+		|| die "amneziawg-tools build failed: $(tail -15 "$BUILD_DIR/awg-tools.log")"
 
 	command -v awg >/dev/null || die "awg was not installed"
 	command -v awg-quick >/dev/null || die "awg-quick was not installed"
@@ -189,6 +194,7 @@ vs_generate_params() {
 	VS_NET4_PREFIX="10.$o2.$o3"
 	VS_NET4="$VS_NET4_PREFIX.0/24"
 	VS_DNS_IP="$VS_NET4_PREFIX.1"
+	VS_DNS_IP6=
 
 	# A tunnel-local IPv6 range is only useful when the server itself has
 	# working IPv6 connectivity to masquerade behind.
@@ -198,6 +204,7 @@ vs_generate_params() {
 		h6=$(rand_hex 5)
 		VS_NET6_PREFIX="fd${h6:0:2}:${h6:2:4}:${h6:6:4}::"
 		VS_NET6="${VS_NET6_PREFIX}/64"
+		VS_DNS_IP6="${VS_NET6_PREFIX}1"
 	else
 		VS_HAS_V6=0
 		VS_NET6_PREFIX=
@@ -284,16 +291,21 @@ vs_write_xray_conf() {
 	# server.
 	jq -n \
 		--arg doh "$VS_DOH" --arg qs "$qs" --arg dstrat "$dstrat" \
-		--arg dnsip "$VS_DNS_IP" --argjson xport "$VS_XRAY_PORT" --arg listen "$listen" \
+		--arg dnsip "$VS_DNS_IP" --arg dnsip6 "$VS_DNS_IP6" \
+		--argjson xport "$VS_XRAY_PORT" --arg listen "$listen" \
 		--arg tag "$VS_XRAY_TAG" --arg sni "$VS_REALITY_SNI" \
 		--arg priv "$VS_REALITY_PRIV" --arg sid "$VS_REALITY_SID" \
 		--arg path "$VS_XHTTP_PATH" --arg mcv "$VS_MIN_CLIENT_VER" '
 {
   "log": { "loglevel": "warning" },
   "dns": { "servers": ($doh | split(",") | map(select(length > 0))), "queryStrategy": $qs },
-  "inbounds": [
+  "inbounds": ([
     { "tag": "dns-in", "listen": $dnsip, "port": 53, "protocol": "dokodemo-door",
-      "settings": { "address": "1.1.1.1", "port": 53, "network": "tcp,udp" } },
+      "settings": { "address": "1.1.1.1", "port": 53, "network": "tcp,udp" } }
+  ] + (if $dnsip6 == "" then [] else [
+    { "tag": "dns-in6", "listen": $dnsip6, "port": 53, "protocol": "dokodemo-door",
+      "settings": { "address": "1.1.1.1", "port": 53, "network": "tcp,udp" } }
+  ] end) + [
     { "tag": $tag, "listen": $listen, "port": $xport, "protocol": "vless",
       "settings": { "clients": [], "decryption": "none" },
       "streamSettings": {
@@ -305,7 +317,7 @@ vs_write_xray_conf() {
         "xhttpSettings": { "path": $path, "mode": "auto" }
       },
       "sniffing": { "enabled": true, "destOverride": [ "http", "tls", "quic" ] } }
-  ],
+  ]),
   "outbounds": [
     { "tag": "direct", "protocol": "freedom", "settings": { "domainStrategy": $dstrat } },
     { "tag": "dns-out", "protocol": "dns" },
@@ -314,7 +326,7 @@ vs_write_xray_conf() {
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-      { "type": "field", "inboundTag": [ "dns-in" ], "outboundTag": "dns-out" },
+      { "type": "field", "inboundTag": [ "dns-in", "dns-in6" ], "outboundTag": "dns-out" },
       { "type": "field", "port": 53, "outboundTag": "dns-out" },
       { "type": "field", "ip": [ "geoip:private" ], "outboundTag": "block" }
     ]
@@ -345,12 +357,21 @@ vs_write_firewall() {
 	cat > /usr/local/sbin/vpnscript-firewall <<'EOF'
 #!/usr/bin/env bash
 # Managed by vpnscript. Idempotent: safe to re-run at any time.
+#   vpnscript-firewall          install the rules
+#   vpnscript-firewall flush    remove them again
 set -eu
 . /etc/vpnscript/server.env
+MODE=${1:-apply}
 
 ensure() { # ensure <cmd> <table> <chain> <rule...>
 	local cmd=$1 table=$2 chain=$3; shift 3
 	command -v "$cmd" >/dev/null 2>&1 || return 0
+	if [ "$MODE" = flush ]; then
+		while "$cmd" -t "$table" -C "$chain" "$@" 2>/dev/null; do
+			"$cmd" -t "$table" -D "$chain" "$@" 2>/dev/null || break
+		done
+		return 0
+	fi
 	"$cmd" -t "$table" -C "$chain" "$@" 2>/dev/null || "$cmd" -t "$table" -I "$chain" 1 "$@"
 }
 
@@ -359,6 +380,13 @@ ensure iptables filter INPUT -p tcp --dport "$VS_XRAY_PORT" -j ACCEPT
 ensure iptables filter INPUT -i "$VS_AWG_IF" -p udp --dport 53 -j ACCEPT
 ensure iptables filter INPUT -i "$VS_AWG_IF" -p tcp --dport 53 -j ACCEPT
 ensure iptables filter INPUT -i "$VS_AWG_IF" -p icmp -j ACCEPT
+# Redirect every DNS query that enters the tunnel to our own resolver, whatever
+# server the client is configured to use. Without this a client that ignores the
+# pushed DNS sends cleartext queries straight through -- which both leaks and
+# breaks resolution wherever the client's own resolver is blocked.
+ensure iptables nat PREROUTING -i "$VS_AWG_IF" -p udp --dport 53 -j DNAT --to-destination "$VS_DNS_IP:53"
+ensure iptables nat PREROUTING -i "$VS_AWG_IF" -p tcp --dport 53 -j DNAT --to-destination "$VS_DNS_IP:53"
+
 ensure iptables filter FORWARD -i "$VS_AWG_IF" -j ACCEPT
 ensure iptables filter FORWARD -o "$VS_AWG_IF" -j ACCEPT
 ensure iptables nat POSTROUTING -s "$VS_NET4" ! -o "$VS_AWG_IF" -j MASQUERADE
@@ -368,6 +396,10 @@ if [ "${VS_HAS_V6:-0}" = 1 ]; then
 	ensure ip6tables filter INPUT -i "$VS_AWG_IF" -p udp --dport 53 -j ACCEPT
 	ensure ip6tables filter INPUT -i "$VS_AWG_IF" -p tcp --dport 53 -j ACCEPT
 	ensure ip6tables filter INPUT -i "$VS_AWG_IF" -p ipv6-icmp -j ACCEPT
+	if [ -n "${VS_DNS_IP6:-}" ]; then
+		ensure ip6tables nat PREROUTING -i "$VS_AWG_IF" -p udp --dport 53 -j DNAT --to-destination "[$VS_DNS_IP6]:53"
+		ensure ip6tables nat PREROUTING -i "$VS_AWG_IF" -p tcp --dport 53 -j DNAT --to-destination "[$VS_DNS_IP6]:53"
+	fi
 	ensure ip6tables filter FORWARD -i "$VS_AWG_IF" -j ACCEPT
 	ensure ip6tables filter FORWARD -o "$VS_AWG_IF" -j ACCEPT
 	ensure ip6tables nat POSTROUTING -s "$VS_NET6" ! -o "$VS_AWG_IF" -j MASQUERADE
@@ -375,8 +407,13 @@ fi
 
 # ufw keeps its own chains; teach it about the listening ports as well.
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 | grep -qi active; then
-	ufw allow "$VS_AWG_PORT"/udp  >/dev/null 2>&1 || true
-	ufw allow "$VS_XRAY_PORT"/tcp >/dev/null 2>&1 || true
+	if [ "$MODE" = flush ]; then
+		ufw delete allow "$VS_AWG_PORT"/udp  >/dev/null 2>&1 || true
+		ufw delete allow "$VS_XRAY_PORT"/tcp >/dev/null 2>&1 || true
+	else
+		ufw allow "$VS_AWG_PORT"/udp  >/dev/null 2>&1 || true
+		ufw allow "$VS_XRAY_PORT"/tcp >/dev/null 2>&1 || true
+	fi
 fi
 EOF
 	chmod 0755 /usr/local/sbin/vpnscript-firewall
@@ -468,7 +505,27 @@ vs_install_main() {
 	if [ "$VS_FORCE" = 1 ] && [ -e "$VS_STATE" ]; then
 		log "--force: tearing down the previous installation"
 		# shellcheck disable=SC1090
-		( . "$VS_STATE"; systemctl disable --now "awg-quick@${VS_AWG_IF:-awg0}" >/dev/null 2>&1 || true )
+		(
+			. "$VS_STATE"
+			systemctl disable --now "awg-quick@${VS_AWG_IF:-awg0}" >/dev/null 2>&1 || true
+			del() {
+				local cmd=$1 table=$2 chain=$3; shift 3
+				command -v "$cmd" >/dev/null 2>&1 || return 0
+				while "$cmd" -t "$table" -C "$chain" "$@" 2>/dev/null; do
+					"$cmd" -t "$table" -D "$chain" "$@" 2>/dev/null || break
+				done
+				return 0
+			}
+			del iptables nat PREROUTING -i "${VS_AWG_IF:-awg0}" -p udp --dport 53 -j DNAT --to-destination "${VS_DNS_IP:-0.0.0.0}:53"
+			del iptables nat PREROUTING -i "${VS_AWG_IF:-awg0}" -p tcp --dport 53 -j DNAT --to-destination "${VS_DNS_IP:-0.0.0.0}:53"
+			del iptables nat POSTROUTING -s "${VS_NET4:-10.0.0.0/8}" ! -o "${VS_AWG_IF:-awg0}" -j MASQUERADE
+			del iptables filter INPUT -p udp --dport "${VS_AWG_PORT:-0}" -j ACCEPT
+			del iptables filter INPUT -p tcp --dport "${VS_XRAY_PORT:-0}" -j ACCEPT
+			if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 | grep -qi active; then
+				ufw delete allow "${VS_AWG_PORT:-0}"/udp  >/dev/null 2>&1 || true
+				ufw delete allow "${VS_XRAY_PORT:-0}"/tcp >/dev/null 2>&1 || true
+			fi
+		)
 		systemctl disable --now xray >/dev/null 2>&1 || true
 		rm -f "$AWG_ETC"/*.conf
 	fi
