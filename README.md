@@ -106,9 +106,12 @@ resolves everything it is asked over DNS-over-HTTPS.
 
 * **AmneziaWG clients** get `DNS = 10.x.y.1` in their profile, so the whole
   device resolves through the tunnel.
-* **Xray clients** have the same address in their config, and the server hijacks
-  *any* traffic to port 53 arriving through the tunnel, so a client that ignores
-  the setting still ends up encrypted.
+* **Whatever the client is actually configured to use**, every packet to port 53
+  entering the tunnel is redirected to that resolver — by a DNAT rule for
+  AmneziaWG, and by a routing rule for Xray. This matters: plenty of clients
+  ignore a pushed DNS, and a `vless://` share link cannot carry one at all.
+  Without the redirect those clients send cleartext queries straight out of the
+  server, which both leaks and fails wherever their own resolver is blocked.
 * Names that the server resolves on a client's behalf (anything the VLESS
   outbound connects to by hostname) go over DoH as well.
 
@@ -135,7 +138,13 @@ not a misconfiguration.
 
 **IPv6.** If the server has working IPv6, the tunnel is dual-stack and NATs v6
 too. If it does not, clients still route `::/0` into the tunnel, where it is
-dropped — so v6 traffic cannot leak around the VPN.
+dropped — so v6 traffic cannot leak around the VPN — and the resolver answers
+`AAAA` queries with an empty record, so nothing hands a client an address it has
+no route to.
+
+**Running a client profile on the server itself** repoints the machine's own
+resolver at the tunnel, because `resolvconf` state is not per-namespace. If you
+want to test a profile on the VPN host, strip the `DNS =` line from it first.
 
 **Kernel module.** AmneziaWG runs on the userspace `amneziawg-go` datapath rather
 than a DKMS kernel module. That is deliberate: it behaves identically on Ubuntu
@@ -149,7 +158,7 @@ costs some throughput on very fast links.
 | `/etc/vpnscript/server.env` | ports, keys, subnets — the state `add.sh` and `remove.sh` read |
 | `/etc/amnezia/amneziawg/awg0.conf` | AmneziaWG interface and peers |
 | `/usr/local/etc/xray/config.json` | Xray inbounds, users, DNS and routing |
-| `/usr/local/sbin/vpnscript-firewall` | idempotent iptables/NAT rules, re-applied at boot |
+| `/usr/local/sbin/vpnscript-firewall` | idempotent iptables/NAT/DNS-redirect rules, re-applied at boot; `vpnscript-firewall flush` removes them |
 | `/etc/sysctl.d/99-vpnscript.conf` | forwarding and non-local bind |
 
 Services: `awg-quick@awg0`, `xray`, `vpnscript-firewall`.
