@@ -54,6 +54,9 @@ vs_preflight() {
 vs_apt() {
 	log "installing build and runtime packages"
 	export DEBIAN_FRONTEND=noninteractive
+	# Ubuntu's needrestart hook otherwise restarts a dozen services -- sshd
+	# among them -- in the middle of the install.
+	export NEEDRESTART_SUSPEND=1
 	apt-get update -qq
 	apt-get install -y -qq --no-install-recommends \
 		ca-certificates curl unzip git make gcc libc6-dev jq iproute2 iptables procps >/dev/null
@@ -113,8 +116,9 @@ vs_install_amneziawg() {
 	(
 		cd "$BUILD_DIR/awg-go"
 		export PATH="$(dirname "$GO_BIN"):$PATH" GOFLAGS=-buildvcs=false GOCACHE="$BUILD_DIR/gocache"
-		make >/dev/null
-	) || die "amneziawg-go build failed"
+		make
+	) > "$BUILD_DIR/awg-go.log" 2>&1 \
+		|| die "amneziawg-go build failed: $(tail -15 "$BUILD_DIR/awg-go.log")"
 
 	local bin
 	bin=$(find "$BUILD_DIR/awg-go" -maxdepth 1 -type f \( -name amneziawg-go -o -name awg-go \) | head -1)
@@ -126,10 +130,11 @@ vs_install_amneziawg() {
 		|| { rm -rf "$BUILD_DIR/awg-tools"; git clone -q --depth 1 https://github.com/amnezia-vpn/amneziawg-tools "$BUILD_DIR/awg-tools"; }
 	(
 		cd "$BUILD_DIR/awg-tools/src"
-		make -s -j"$(nproc)" >/dev/null
+		make -s -j"$(nproc)"
 		make -s install PREFIX=/usr SYSCONFDIR=/etc SYSTEMDUNITDIR="$SYSTEMD_DIR" \
-			WITH_WGQUICK=yes WITH_SYSTEMDUNITS=yes WITH_BASHCOMPLETION=yes >/dev/null
-	) || die "amneziawg-tools build failed"
+			WITH_WGQUICK=yes WITH_SYSTEMDUNITS=yes WITH_BASHCOMPLETION=yes
+	) > "$BUILD_DIR/awg-tools.log" 2>&1 \
+		|| die "amneziawg-tools build failed: $(tail -15 "$BUILD_DIR/awg-tools.log")"
 
 	command -v awg >/dev/null || die "awg was not installed"
 	command -v awg-quick >/dev/null || die "awg-quick was not installed"
