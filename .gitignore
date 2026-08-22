@@ -1,0 +1,5 @@
+# Downloaded client configs contain private keys and uuids -- never commit them.
+configs/
+*.conf
+*.xray.json
+*.vless.url
