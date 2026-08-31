@@ -5,6 +5,12 @@
 # Expects from the caller: VS_ENDPOINT, VS_CLIENT_COUNT, VS_CLIENT_PREFIX,
 # VS_REALITY_SNI, VS_DOH, VS_FORCE.
 
+# AmneziaWG protocol series to build. 3.x adds header protection and content
+# padding on top of the 2.0 junk/padding/header obfuscation.
+AWG_SERIES=v3.1
+AWG_GO_FALLBACK=v3.1.20260828
+AWG_TOOLS_FALLBACK=v3.1.20260812
+
 SYSTEMD_DIR=/usr/lib/systemd/system
 [ -d "$SYSTEMD_DIR" ] || SYSTEMD_DIR=/lib/systemd/system
 
@@ -107,8 +113,19 @@ vs_setup_go() {
 
 # ------------------------------------------------------------------- amneziawg
 
+# Newest tag on the given series, e.g. vs_series_tag amneziawg-go v3.1.
+vs_series_tag() {
+	curl -fsSL "https://api.github.com/repos/amnezia-vpn/$1/tags" 2>/dev/null \
+		| jq -r --arg p "$2" '[.[].name | select(startswith($p))] | sort | reverse | .[0] // empty' \
+		2>/dev/null || true
+}
+
 vs_install_amneziawg() {
-	local goref=${VS_AWG_GO_REF:-master} toolsref=${VS_AWG_TOOLS_REF:-master}
+	local goref toolsref
+	goref=${VS_AWG_GO_REF:-$(vs_series_tag amneziawg-go "$AWG_SERIES.")}
+	toolsref=${VS_AWG_TOOLS_REF:-$(vs_series_tag amneziawg-tools "$AWG_SERIES.")}
+	[ -n "$goref" ] || goref=$AWG_GO_FALLBACK
+	[ -n "$toolsref" ] || toolsref=$AWG_TOOLS_FALLBACK
 
 	log "building amneziawg-go ($goref)"
 	git clone -q --depth 1 --branch "$goref" https://github.com/amnezia-vpn/amneziawg-go "$BUILD_DIR/awg-go" 2>/dev/null \
@@ -211,25 +228,32 @@ vs_generate_params() {
 		VS_NET6=
 	fi
 
-	# AmneziaWG 2.0 obfuscation. Jc/Jmin/Jmax add junk packets before each
+	# AmneziaWG 3.1 obfuscation. Jc/Jmin/Jmax add junk packets before each
 	# handshake, S1-S4 pad the four message types, H1-H4 replace the message
 	# type constants that make plain WireGuard trivial to fingerprint, and I1
-	# is the 2.0 signature packet sent ahead of the handshake.
+	# is the signature packet sent ahead of the handshake. On top of that 3.x
+	# encrypts the low-entropy header fields under HeaderProtectionKey -- which
+	# draws its nonce from the S1-S4 padding, so none of them may fall below
+	# 12 -- and adds a random amount of padding to every transport packet.
 	VS_JC=$(rnd 4 8)
 	VS_JMIN=$(rnd 40 80)
 	VS_JMAX=$(rnd 700 1000)
-	VS_S1=$(rnd 15 150)
-	VS_S2=$(rnd 15 150)
+	VS_S1=$(rnd 16 150)
+	VS_S2=$(rnd 16 150)
 	# Keep the padded init and response messages different sizes.
-	while [ "$VS_S2" -eq $(( VS_S1 + 56 )) ]; do VS_S2=$(rnd 15 150); done
-	VS_S3=$(rnd 15 64)
-	VS_S4=$(rnd 15 32)
+	while [ "$VS_S2" -eq $(( VS_S1 + 56 )) ]; do VS_S2=$(rnd 16 150); done
+	VS_S3=$(rnd 16 64)
+	VS_S4=$(rnd 16 32)
 	# Header values must stay clear of the real message types 1-4 and of each other.
 	VS_H1=$(rnd 5 2147483647)
 	VS_H2=$(rnd 5 2147483647); while [ "$VS_H2" = "$VS_H1" ]; do VS_H2=$(rnd 5 2147483647); done
 	VS_H3=$(rnd 5 2147483647); while [ "$VS_H3" = "$VS_H1" ] || [ "$VS_H3" = "$VS_H2" ]; do VS_H3=$(rnd 5 2147483647); done
 	VS_H4=$(rnd 5 2147483647); while [ "$VS_H4" = "$VS_H1" ] || [ "$VS_H4" = "$VS_H2" ] || [ "$VS_H4" = "$VS_H3" ]; do VS_H4=$(rnd 5 2147483647); done
 	VS_I1="<b 0x$(rand_hex 8)><r $(rnd 32 96)>"
+	VS_HPK=$(awg genkey)
+	local cpa_lo cpa_hi
+	cpa_lo=$(rnd 4 16); cpa_hi=$(rnd 32 64)
+	VS_CPA="$cpa_lo-$cpa_hi"
 
 	local kp
 	kp=$("$XRAY_BIN" x25519)
@@ -241,7 +265,7 @@ vs_generate_params() {
 	VS_REALITY_SID=$(rand_hex 8)
 	VS_XHTTP_PATH=$(rand_path)
 
-	log "AmneziaWG on udp/$VS_AWG_PORT, Xray XHTTP+REALITY on tcp/$VS_XRAY_PORT"
+	log "AmneziaWG 3.1 on udp/$VS_AWG_PORT, Xray XHTTP+REALITY on tcp/$VS_XRAY_PORT"
 	log "tunnel $VS_NET4${VS_NET6:+ + $VS_NET6}, DNS $VS_DNS_IP -> $VS_DOH"
 }
 
@@ -275,6 +299,8 @@ H1 = $VS_H1
 H2 = $VS_H2
 H3 = $VS_H3
 H4 = $VS_H4
+HeaderProtectionKey = $VS_HPK
+ContentPaddingAddition = $VS_CPA
 EOF
 	chmod 600 "$conf"
 }

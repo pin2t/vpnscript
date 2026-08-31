@@ -81,7 +81,8 @@ vs_load_state() {
 	. "$VS_STATE"
 	local v
 	for v in VS_ENDPOINT VS_AWG_IF VS_AWG_PORT VS_AWG_PUB VS_NET4_PREFIX VS_DNS_IP \
-		VS_MTU VS_HAS_V6 VS_XRAY_PORT VS_XRAY_TAG VS_REALITY_PBK VS_REALITY_SID VS_XHTTP_PATH; do
+		VS_MTU VS_HAS_V6 VS_HPK VS_CPA \
+		VS_XRAY_PORT VS_XRAY_TAG VS_REALITY_PBK VS_REALITY_SID VS_XHTTP_PATH; do
 		[ -n "${!v:-}" ] || die "$VS_STATE is incomplete (no $v) -- reinstall with: install.sh --force"
 	done
 }
@@ -95,6 +96,7 @@ vs_save_state() {
 		for k in VS_VERSION VS_ENDPOINT VS_AWG_IF VS_AWG_PORT VS_AWG_PUB \
 			VS_NET4 VS_NET4_PREFIX VS_NET6 VS_NET6_PREFIX VS_HAS_V6 VS_DNS_IP VS_DNS_IP6 VS_MTU \
 			VS_JC VS_JMIN VS_JMAX VS_S1 VS_S2 VS_S3 VS_S4 VS_H1 VS_H2 VS_H3 VS_H4 VS_I1 \
+			VS_HPK VS_CPA \
 			VS_XRAY_PORT VS_XRAY_TAG VS_REALITY_SNI VS_REALITY_PBK VS_REALITY_SID \
 			VS_XHTTP_PATH VS_DOH; do
 			printf "%s='%s'\n" "$k" "${!k}"
@@ -166,8 +168,10 @@ vs_render_awg_client() {
 # vpnscript-client = $name
 # vpnscript-server = $VS_ENDPOINT
 #
-# AmneziaWG 2.0 profile. Import it into the AmneziaVPN app (4.8.12.9+), or on
-# Linux drop it in /etc/amnezia/amneziawg/ and run: awg-quick up $name
+# AmneziaWG 3.1 profile. Needs a client with AmneziaWG 3.x support: a current
+# AmneziaVPN app, or on Linux drop this in /etc/amnezia/amneziawg/ and run
+#   awg-quick up $name
+# HeaderProtectionKey and the S1-S4 paddings must match the server exactly.
 # DNS resolves inside the tunnel and is forwarded upstream over DNS-over-HTTPS.
 [Interface]
 PrivateKey = $priv
@@ -186,6 +190,8 @@ H2 = $VS_H2
 H3 = $VS_H3
 H4 = $VS_H4
 I1 = $VS_I1
+HeaderProtectionKey = $VS_HPK
+ContentPaddingAddition = $VS_CPA
 
 [Peer]
 PublicKey = $VS_AWG_PUB

@@ -9,12 +9,12 @@ server with two independent entry points, and hand you the client configs.
 
 | | |
 |---|---|
-| **AmneziaWG 2.0** | WireGuard with DPI-resistant obfuscation, on a random UDP port in 1200–2000 |
+| **AmneziaWG 3.1** | WireGuard with DPI-resistant obfuscation and encrypted packet headers, on a random UDP port in 1200–2000 |
 | **Xray VLESS** | XHTTP transport wrapped in REALITY, on a random TCP port in 1200–2000 |
 | **DNS** | both tunnels resolve through the server, which forwards upstream over DNS-over-HTTPS |
 
 Two protocols because they fail differently: AmneziaWG is a fast full-device
-tunnel that survives naive UDP-based DPI, while Xray/REALITY is indistinguishable
+tunnel that survives UDP-based DPI, while Xray/REALITY is indistinguishable
 from a TLS session to a real website and gets through where UDP is blocked
 outright. The same client name exists on both, so anyone can switch.
 
@@ -145,6 +145,15 @@ no route to.
 **Running a client profile on the server itself** repoints the machine's own
 resolver at the tunnel, because `resolvconf` state is not per-namespace. If you
 want to test a profile on the VPN host, strip the `DNS =` line from it first.
+
+**AmneziaWG 3.1.** On top of the 2.x junk packets, message paddings and header
+values, 3.x encrypts the low-entropy header fields under a `HeaderProtectionKey`
+shared by both ends, and pads every transport packet by a random amount. The
+cipher takes its nonce from the `S1`–`S4` padding, so the generated values never
+fall below 12. Both ends must speak 3.x: an older client, or one that lacks the
+key, will not complete a handshake. The build tracks the newest `v3.1.*` tag of
+`amneziawg-go` and `amneziawg-tools`; override with `VS_AWG_GO_REF` /
+`VS_AWG_TOOLS_REF` to pin something else.
 
 **Kernel module.** AmneziaWG runs on the userspace `amneziawg-go` datapath rather
 than a DKMS kernel module. That is deliberate: it behaves identically on Ubuntu
