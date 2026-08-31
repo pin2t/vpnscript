@@ -3,3 +3,6 @@ configs/
 *.conf
 *.xray.json
 *.vless.url
+
+# macOS
+.DS_Store

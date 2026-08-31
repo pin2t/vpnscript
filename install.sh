@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install.sh -- set up an AmneziaWG 2.0 + Xray XHTTP/REALITY server on a fresh
+# install.sh -- set up an AmneziaWG 3.1 + Xray XHTTP/REALITY server on a fresh
 # Ubuntu 24+ / Debian 13 host and download the client configs.
 #
 #   ./install.sh root@203.0.113.10
@@ -19,7 +19,8 @@ Installs two independent VPN entry points on the remote host and downloads the
 generated client configs to this machine. Nothing is left behind on the server:
 client private keys are generated, handed over and dropped.
 
-  AmneziaWG 2.0   obfuscated WireGuard, random UDP port in 1200-2000
+  AmneziaWG 3.1   obfuscated WireGuard with header protection, random UDP
+                  port in 1200-2000
   Xray            VLESS over XHTTP with REALITY, random TCP port in 1200-2000
   DNS             both tunnels resolve through the server, which forwards
                   upstream over DNS-over-HTTPS
