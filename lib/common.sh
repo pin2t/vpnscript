@@ -51,10 +51,16 @@ vs_run_remote() {
 		v=${kv#*=}
 		prelude="$prelude$k=$(printf '%q' "$v")"$'\n'
 	done
+	# The build phases are silent for minutes at a time, which is long enough for
+	# an idle connection to be dropped -- and a drop mid-install loses the client
+	# keys, which only ever exist in this stream. Keepalives hold the session open
+	# through five minutes of silence.
 	{
 		printf '%s' "$prelude"
 		cat "$VS_LIB/remote-common.sh" "$VS_LIB/$payload"
-	} | ssh -o ConnectTimeout=15 "$target" bash -s
+	} | ssh -o ConnectTimeout=15 \
+		-o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+		"$target" bash -s
 }
 
 # --------------------------------------------------------------- file payloads
