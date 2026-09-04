@@ -196,6 +196,9 @@ vs_install_xray() {
 
 vs_generate_params() {
 	VS_VERSION=1
+	# Marks this installation's client set. Peers and users from an earlier
+	# install are gone, and so is the meaning of anything logged before now.
+	VS_INSTALLED_AT=$(date +%s)
 	VS_AWG_IF=awg0
 	VS_XRAY_TAG=vless-in
 	VS_MTU=1280
@@ -205,6 +208,14 @@ vs_generate_params() {
 	VS_AWG_PORT=$(pick_port)
 	VS_XRAY_PORT=$(pick_port)
 	while [ "$VS_XRAY_PORT" = "$VS_AWG_PORT" ]; do VS_XRAY_PORT=$(pick_port); done
+
+	# Xray's gRPC API, which is where the per-client counters stat.sh prints
+	# come from. It is bound to loopback, so it never listens anywhere that
+	# would need a firewall rule to protect it.
+	VS_XRAY_API_PORT=$(pick_port)
+	while [ "$VS_XRAY_API_PORT" = "$VS_AWG_PORT" ] || [ "$VS_XRAY_API_PORT" = "$VS_XRAY_PORT" ]; do
+		VS_XRAY_API_PORT=$(pick_port)
+	done
 
 	local o2 o3 h6
 	o2=$(rnd 20 250); o3=$(rnd 1 250)
@@ -319,13 +330,19 @@ vs_write_xray_conf() {
 		--arg doh "$VS_DOH" --arg qs "$qs" --arg dstrat "$dstrat" \
 		--arg dnsip "$VS_DNS_IP" --arg dnsip6 "$VS_DNS_IP6" \
 		--argjson xport "$VS_XRAY_PORT" --arg listen "$listen" \
+		--argjson apiport "$VS_XRAY_API_PORT" \
 		--arg tag "$VS_XRAY_TAG" --arg sni "$VS_REALITY_SNI" \
 		--arg priv "$VS_REALITY_PRIV" --arg sid "$VS_REALITY_SID" \
 		--arg path "$VS_XHTTP_PATH" --arg mcv "$VS_MIN_CLIENT_VER" '
 {
   "log": { "loglevel": "warning" },
   "dns": { "servers": ($doh | split(",") | map(select(length > 0))), "queryStrategy": $qs },
+  "stats": {},
+  "api": { "tag": "api", "services": [ "StatsService" ] },
+  "policy": { "levels": { "0": { "statsUserUplink": true, "statsUserDownlink": true } } },
   "inbounds": ([
+    { "tag": "api", "listen": "127.0.0.1", "port": $apiport, "protocol": "dokodemo-door",
+      "settings": { "address": "127.0.0.1" } },
     { "tag": "dns-in", "listen": $dnsip, "port": 53, "protocol": "dokodemo-door",
       "settings": { "address": "1.1.1.1", "port": 53, "network": "tcp,udp" } }
   ] + (if $dnsip6 == "" then [] else [
@@ -352,6 +369,7 @@ vs_write_xray_conf() {
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
+      { "type": "field", "inboundTag": [ "api" ], "outboundTag": "api" },
       { "type": "field", "inboundTag": [ "dns-in", "dns-in6" ], "outboundTag": "dns-out" },
       { "type": "field", "port": 53, "outboundTag": "dns-out" },
       { "type": "field", "ip": [ "geoip:private" ], "outboundTag": "block" }

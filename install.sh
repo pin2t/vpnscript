@@ -119,4 +119,5 @@ cat >&2 <<EOF
 
   ${L_D}Add another client:  ./add.sh $target${L_0}
   ${L_D}Revoke one:          ./remove.sh $target $outdir/${prefix}01.conf${L_0}
+  ${L_D}See who is using it: ./stat.sh $target${L_0}
 EOF
