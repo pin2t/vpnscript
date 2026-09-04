@@ -1,6 +1,6 @@
 # vpnscript
 
-Three scripts that turn a bare Ubuntu 24+ / Debian 13 box into a self-hosted VPN
+Four scripts that turn a bare Ubuntu 24+ / Debian 13 box into a self-hosted VPN
 server with two independent entry points, and hand you the client configs.
 
 ```bash
@@ -89,6 +89,51 @@ revoke that client from **both** protocols.
 
 Your local copies are left alone; delete them when you are done with them.
 
+### stat.sh — see who is using the server
+
+```bash
+./stat.sh root@203.0.113.10
+```
+
+```
+AmneziaWG  awg0  udp/1395
+Name       | IP          | Received   | Sent      | Seen        | Status
+-------------------------------------------------------------------------
+my_phone   | 10.79.227.2 | 251.78 MiB | 1.15 GiB  | just now    | Active
+my_laptop  | 10.79.227.3 | 0 B        | 0 B       | never       | Inactive
+pi         | 10.79.227.4 | 5.15 GiB   | 8.38 GiB  | 3 hours ago | Recent
+mbp        | 10.79.227.5 | 758.15 MiB | 7.53 GiB  | 2 weeks ago | Inactive
+
+Xray  vless/reality  tcp/1611
+Name       | Source       | Received | Sent     | Seen      | Status
+----------------------------------------------------------------------
+my_phone   | 203.0.113.44 | 1.77 KiB | 9.56 MiB | 2 min ago | Active
+my_laptop  | -            | 0 B      | 0 B      | never     | Inactive
+```
+
+`Seen` is when the client last showed up, and `Status` follows from it: **Active**
+within three minutes, **Recent** within a day, **Inactive** after that.
+
+The two tables are measured differently. AmneziaWG counts bytes per peer in the
+tunnel itself, and its `IP` is the address the client holds inside the tunnel.
+Xray's counters come from its stats API, which `install.sh` switches on — they
+live in memory, so they start again from zero every time xray restarts, which
+`add.sh` and `remove.sh` both do. `Source` and `Seen` come from the connection log
+xray writes to the journal, and `Source` is the public address the client last
+connected *from*; a client quiet for longer than the journal keeps shows up as
+`never`.
+
+Nothing on the server is modified, and `--only awg` / `--only xray` prints one
+table. On a server installed before the stats API was added, the Xray traffic
+columns are missing until you turn it on once:
+
+```bash
+./stat.sh --enable-stats root@203.0.113.10
+```
+
+That edits the Xray config and restarts the daemon — the only thing `stat.sh`
+ever changes on a server.
+
 ## What you get per client
 
 | file | what to do with it |
@@ -166,7 +211,7 @@ costs some throughput on very fast links.
 |---|---|
 | `/etc/vpnscript/server.env` | ports, keys, subnets — the state `add.sh` and `remove.sh` read |
 | `/etc/amnezia/amneziawg/awg0.conf` | AmneziaWG interface and peers |
-| `/usr/local/etc/xray/config.json` | Xray inbounds, users, DNS and routing |
+| `/usr/local/etc/xray/config.json` | Xray inbounds, users, DNS, routing, and the stats API on a loopback-only port |
 | `/usr/local/sbin/vpnscript-firewall` | idempotent iptables/NAT/DNS-redirect rules, re-applied at boot; `vpnscript-firewall flush` removes them |
 | `/etc/sysctl.d/99-vpnscript.conf` | forwarding and non-local bind |
 
@@ -184,10 +229,10 @@ answers a real query before reporting success.
 ## Layout
 
 ```
-install.sh  add.sh  remove.sh     entry points, run on your machine
+install.sh  add.sh  remove.sh  stat.sh   entry points, run on your machine
 lib/common.sh                     local helpers (ssh, payload splitting)
-lib/remote-common.sh              server-side library, shared by all three
-lib/remote-{install,add,remove}.sh  the payloads piped into `ssh … bash -s`
+lib/remote-common.sh              server-side library, shared by all four
+lib/remote-{install,add,remove,stat}.sh  the payloads piped into `ssh … bash -s`
 ```
 
 Nothing is installed on your machine and nothing but the payload is copied to the
