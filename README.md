@@ -1,22 +1,17 @@
 # vpnscript
 
-Four scripts that turn a bare Ubuntu 24+ / Debian 13 box into a self-hosted VPN
-server with two independent entry points, and hand you the client configs.
+Helpful scripts that turn a bare Ubuntu 24+ / Debian 13 box into a self-hosted VPN
+server with two independent entry points, and generate a chunk of client configs.
 
 ```bash
-./install.sh root@203.0.113.10
+./install.sh root@11.22.33.44
 ```
 
 | | |
 |---|---|
-| **AmneziaWG 3.1** | WireGuard with DPI-resistant obfuscation and encrypted packet headers, on a random UDP port in 1200–2000 |
-| **Xray VLESS** | XHTTP transport wrapped in REALITY, on a random TCP port in 1200–2000 |
+| **AmneziaWG 3.1** | WireGuard with DPI-resistant obfuscation and encrypted packet headers, on a random UDP port |
+| **Xray VLESS** | XHTTP transport wrapped in REALITY, on a random TCP port |
 | **DNS** | both tunnels resolve through the server, which forwards upstream over DNS-over-HTTPS |
-
-Two protocols because they fail differently: AmneziaWG is a fast full-device
-tunnel that survives UDP-based DPI, while Xray/REALITY is indistinguishable
-from a TLS session to a real website and gets through where UDP is blocked
-outright. The same client name exists on both, so anyone can switch.
 
 **Client configs are never stored on the server.** Keys are generated, streamed
 to your machine over the ssh session, and dropped. The server keeps only what
@@ -24,7 +19,7 @@ the daemons need to recognise a client: a WireGuard peer and a VLESS uuid.
 
 ## Requirements
 
-* On your machine: `bash`, `ssh`, `awk`. macOS and Linux both work.
+* `bash`, `ssh`, `awk`. macOS and Linux both work.
 * On the server: a fresh Ubuntu 24.04+ or Debian 13 host, root over ssh with
   your key already installed, and outbound internet access.
 
@@ -35,12 +30,12 @@ Everything else is installed by `install.sh`.
 ### install.sh — set up the server and get 10 configs
 
 ```bash
-./install.sh root@203.0.113.10
+./install.sh root@11.22.33.44
 ```
 
 Picks two random free ports, builds and installs AmneziaWG and Xray, wires up
 DNS, creates 10 clients (`client01` … `client10`) and writes their configs to
-`./configs/203.0.113.10/`. Expect it to take a few minutes: a Go toolchain is
+`./configs/11.22.33.44/`. Expect it to take a few minutes: a Go toolchain is
 fetched to build AmneziaWG from source.
 
 ```
@@ -64,8 +59,8 @@ Use `--endpoint` when the address clients should dial is not the one you ssh to
 ### add.sh — issue one more client
 
 ```bash
-./add.sh root@203.0.113.10           # next free name: client11
-./add.sh root@203.0.113.10 laptop    # or name it yourself
+./add.sh root@11.22.33.44           # next free name: client11
+./add.sh root@11.22.33.44 laptop    # or name it yourself
 ```
 
 Creates an AmneziaWG peer and an Xray user under the same name, downloads the
@@ -74,7 +69,7 @@ three files, keeps nothing on the server.
 ### remove.sh — revoke a client
 
 ```bash
-./remove.sh root@203.0.113.10 configs/203.0.113.10/client04.conf
+./remove.sh root@11.22.33.44 configs/11.22.33.44/client04.conf
 ```
 
 Identifies the client from the config file — an AmneziaWG `.conf` by its key, an
@@ -92,8 +87,10 @@ Your local copies are left alone; delete them when you are done with them.
 ### stat.sh — see who is using the server
 
 ```bash
-./stat.sh root@203.0.113.10
+./stat.sh root@11.22.33.44
 ```
+
+Prints statistics for each client
 
 ```
 AmneziaWG  awg0  udp/1395
@@ -107,28 +104,12 @@ mbp        | 10.79.227.5 | 758.15 MiB | 7.53 GiB  | 2 weeks ago | Inactive
 Xray  vless/reality  tcp/1611
 Name       | Source       | Received | Sent     | Seen      | Status
 ----------------------------------------------------------------------
-my_phone   | 203.0.113.44 | 1.77 KiB | 9.56 MiB | 2 min ago | Active
+my_phone   | 11.22.33.44  | 1.77 KiB | 9.56 MiB | 2 min ago | Active
 my_laptop  | -            | 0 B      | 0 B      | never     | Inactive
 ```
 
-`Seen` is when the client last showed up, and `Status` follows from it: **Active**
-within three minutes, **Recent** within a day, **Inactive** after that.
-
-The two tables are measured differently. AmneziaWG counts bytes per peer in the
-tunnel itself, and its `IP` is the address the client holds inside the tunnel.
-Xray's counters come from its stats API, which `install.sh` switches on — they
-live in memory, so they start again from zero every time xray restarts, which
-`add.sh` and `remove.sh` both do. `Source` and `Seen` come from the connection log
-xray writes to the journal, and `Source` is the public address the client last
-connected *from*; a client quiet for longer than the journal keeps shows up as
-`never`.
-
-Nothing on the server is modified, and `--only awg` / `--only xray` prints one
-table. On a server installed before the stats API was added, the Xray traffic
-columns are missing until you turn it on once:
-
 ```bash
-./stat.sh --enable-stats root@203.0.113.10
+./stat.sh --enable-stats root@11.22.33.44
 ```
 
 That edits the Xray config and restarts the daemon — the only thing `stat.sh`
@@ -176,8 +157,7 @@ client is easier to fingerprint. If a phone app fails to connect while
 app, or reinstall with `--min-client-ver 25.1.1` to accept it. Lowering it
 somewhat increases the odds of the server's IP being flagged.
 
-**Non-443 ports.** You asked for random ports in 1200–2000, and that is what you
-get. Xray will note in its log that REALITY on a non-443 port is more
+**Non-443 ports.** Xray will note in its log that REALITY on a non-443 port is more
 conspicuous to a censor than on 443 — an inherent trade-off of the port range,
 not a misconfiguration.
 
@@ -218,13 +198,9 @@ costs some throughput on very fast links.
 Services: `awg-quick@awg0`, `xray`, `vpnscript-firewall`.
 
 ```bash
-ssh root@203.0.113.10 'awg show; systemctl status xray --no-pager'
-ssh root@203.0.113.10 'journalctl -u xray -n 50 --no-pager'
+ssh root@11.22.33.44 'awg show; systemctl status xray --no-pager'
+ssh root@11.22.33.44 'journalctl -u xray -n 50 --no-pager'
 ```
-
-Both installs are verified from the outside in: the scripts check that the
-services are active, that the interface came up, and that the tunnel resolver
-answers a real query before reporting success.
 
 ## Layout
 
